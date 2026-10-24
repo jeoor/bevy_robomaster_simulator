@@ -3,7 +3,7 @@ use bevy::app::App;
 use bevy::asset::AssetId;
 use bevy::color::LinearRgba;
 use bevy::ecs::system::lifetimeless::{Read, Write};
-use bevy::prelude::{Children, Plugin, Resource};
+use bevy::prelude::{Children, DetectChangesMut, Plugin, Resource};
 use bevy::{
     asset::{Assets, Handle},
     camera::visibility::Visibility,
@@ -66,7 +66,7 @@ impl Control for Controller {
                     Activation::Completed => completed,
                 };
                 if let Ok(mut mesh_material) = param.mesh_materials.get_mut(*entity) {
-                    mesh_material.0 = apply.clone()
+                    mesh_material.set_if_neq(MeshMaterial3d(apply.clone()));
                 }
             }
             Self::Visibility(deactivated, activating, activated, completed) => {
@@ -77,7 +77,12 @@ impl Control for Controller {
                     Activation::Completed => (completed, [deactivated, activating, activated]),
                 };
                 for entity in hide.into_iter().flatten() {
-                    set_visibility(*entity, Visibility::Hidden, &mut param.visibilities).unwrap();
+                    // One mesh can represent several activation states. Never hide the mesh
+                    // that is also selected for the current state.
+                    if Some(*entity) != *show {
+                        set_visibility(*entity, Visibility::Hidden, &mut param.visibilities)
+                            .unwrap();
+                    }
                 }
                 if let Some(show) = show {
                     set_visibility(*show, Visibility::Visible, &mut param.visibilities).unwrap();
@@ -274,5 +279,104 @@ pub(super) struct StatefulAppearancePlugin;
 impl Plugin for StatefulAppearancePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<MaterialCache>();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+    use bevy::prelude::*;
+
+    #[derive(Resource)]
+    struct Appearance(Controller);
+
+    fn apply(
+        In(state): In<Activation>,
+        mut controller: ResMut<Appearance>,
+        mut appearance: StatefulAppearance,
+    ) {
+        controller.0.set(state, &mut appearance);
+    }
+
+    #[test]
+    fn unchanged_appearance_does_not_dirty_render_components() {
+        let mut world = World::new();
+        world.init_resource::<Assets<StandardMaterial>>();
+        world.init_resource::<MaterialCache>();
+        let off = world
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::default());
+        let on = world
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::default());
+        let mesh = world.spawn(MeshMaterial3d(off.clone())).id();
+        let visible = world.spawn(Visibility::Hidden).id();
+        world.insert_resource(Appearance(Controller::new_combined(vec![
+            Controller::new_material(mesh, off, on.clone(), on.clone(), on.clone()),
+            Controller::new_visibility(None, Some(visible), Some(visible), Some(visible)),
+        ])));
+
+        world
+            .run_system_once_with(apply, Activation::Deactivated)
+            .unwrap();
+        world.clear_trackers();
+        world
+            .run_system_once_with(apply, Activation::Deactivated)
+            .unwrap();
+        assert!(
+            !world
+                .entity(mesh)
+                .get_ref::<MeshMaterial3d<StandardMaterial>>()
+                .unwrap()
+                .is_changed()
+        );
+        assert!(
+            !world
+                .entity(visible)
+                .get_ref::<Visibility>()
+                .unwrap()
+                .is_changed()
+        );
+
+        world
+            .run_system_once_with(apply, Activation::Activating)
+            .unwrap();
+        assert_eq!(
+            world
+                .get::<MeshMaterial3d<StandardMaterial>>(mesh)
+                .unwrap()
+                .0,
+            on
+        );
+        assert_eq!(
+            *world.get::<Visibility>(visible).unwrap(),
+            Visibility::Visible
+        );
+        assert!(
+            world
+                .entity(mesh)
+                .get_ref::<MeshMaterial3d<StandardMaterial>>()
+                .unwrap()
+                .is_changed()
+        );
+        world.clear_trackers();
+        world
+            .run_system_once_with(apply, Activation::Activating)
+            .unwrap();
+        assert!(
+            !world
+                .entity(visible)
+                .get_ref::<Visibility>()
+                .unwrap()
+                .is_changed()
+        );
+        assert!(
+            !world
+                .entity(mesh)
+                .get_ref::<MeshMaterial3d<StandardMaterial>>()
+                .unwrap()
+                .is_changed()
+        );
     }
 }

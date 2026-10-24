@@ -10,4 +10,4 @@ bevy = { workspace = true }
 objc2 = "0.6.4"
 objc2-metal = { version = "0.3.2", default-features = false }
 objc2-metal-fx = "0.3.2"
-wgpu = "29.0.3"
+wgpu = "30"

@@ -23,11 +23,13 @@
 //! [`drive_async_world`] poll again. Between a spawn and its `WorldInstanceReady`, the task costs
 //! nothing.
 
+use bevy::asset::WaitForAssetError;
 use bevy::ecs::event::EntityEvent;
 use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
 use bevy::world_serialization::{WorldAssetRoot, WorldInstanceReady};
-use std::any::Any;
+use futures::channel::oneshot;
+use std::collections::VecDeque;
 use std::future::{Future, poll_fn};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -35,7 +37,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
 
 /// Work a suspended task wants performed on the world before it is polled again.
-type WorldJob = Box<dyn FnOnce(&mut World) -> Box<dyn Any + Send> + Send>;
+type WorldJob = Box<dyn FnOnce(&mut World) + Send>;
 
 /// Setting this flag is the only thing waking the task does; the driver checks it before polling.
 struct TaskWaker {
@@ -120,12 +122,11 @@ impl Signal {
 
 /// The rendezvous between a suspended task and [`drive_async_world`].
 ///
-/// At most one job and one result are outstanding, because a task is a single chain of awaits and
-/// can only be blocked on one thing.
-#[derive(Default)]
+/// Each job owns its typed reply channel. Cloned handles can queue independent operations;
+/// the driver still executes all world mutations sequentially.
 struct TaskChannel {
-    job: Mutex<Option<WorldJob>>,
-    result: Mutex<Option<Box<dyn Any + Send>>>,
+    jobs: Mutex<VecDeque<WorldJob>>,
+    waker: Arc<TaskWaker>,
 }
 
 /// Handle passed to an async task, granting deferred access to the world.
@@ -135,14 +136,23 @@ pub struct AsyncWorld {
 }
 
 impl AsyncWorld {
-    /// Spawns a world asset root and resolves once its instance has finished spawning.
+    /// Waits for the asset and its dependencies, then spawns its complete world instance.
     ///
     /// Taking the [`WorldAssetRoot`] separately from the rest of the bundle is what makes the wait
     /// safe: an entity that never loads a world would never become ready, and this signature makes
     /// that unrepresentable.
-    pub async fn spawn(&self, root: WorldAssetRoot, extra: impl Bundle) -> Entity {
-        self.spawn_observing::<WorldInstanceReady>((root, extra))
-            .await
+    pub async fn spawn(
+        &self,
+        root: WorldAssetRoot,
+        extra: impl Bundle,
+    ) -> Result<Entity, WaitForAssetError> {
+        let assets = self
+            .with_world(|world| world.resource::<AssetServer>().clone())
+            .await;
+        assets.wait_for_asset(&root.0).await?;
+        Ok(self
+            .spawn_observing::<WorldInstanceReady>((root, extra))
+            .await)
     }
 
     /// Spawns `bundle` and resolves when `E` is first triggered on the new entity.
@@ -154,8 +164,9 @@ impl AsyncWorld {
 
         let entity = self
             .with_world(move |world| {
-                let entity = world.spawn(bundle).id();
+                let entity = world.spawn_empty().id();
                 observe_once::<E>(world, entity, arrival);
+                world.entity_mut(entity).insert(bundle);
                 entity
             })
             .await;
@@ -215,25 +226,18 @@ impl AsyncWorld {
         F: FnOnce(&mut World) -> T + Send + 'static,
         T: Send + 'static,
     {
-        let channel = self.channel.clone();
-        let mut job = Some(job);
-
-        poll_fn(move |cx| {
-            if let Some(result) = channel.result.lock().unwrap().take() {
-                let result = result
-                    .downcast::<T>()
-                    .expect("async world job result type mismatch");
-                return Poll::Ready(*result);
-            }
-
-            let job = job.take().expect("async world job polled after completion");
-            *channel.job.lock().unwrap() = Some(Box::new(move |world| {
-                Box::new(job(world)) as Box<dyn Any + Send>
+        let (reply, result) = oneshot::channel();
+        self.channel
+            .jobs
+            .lock()
+            .unwrap()
+            .push_back(Box::new(move |world| {
+                let _ = reply.send(job(world));
             }));
-            cx.waker().wake_by_ref();
-            Poll::Pending
-        })
-        .await
+        self.channel.waker.wake_by_ref();
+        result
+            .await
+            .expect("async world driver dropped a queued job")
     }
 }
 
@@ -243,11 +247,14 @@ impl AsyncWorld {
 /// another entity's arrival.
 fn observe_once<E: EntityEvent>(world: &mut World, entity: Entity, signal: Arc<Signal>) {
     let arrived = AtomicBool::new(false);
-    world.entity_mut(entity).observe(move |_: On<E>| {
-        if !arrived.swap(true, Ordering::Relaxed) {
-            signal.arrive();
-        }
-    });
+    world
+        .entity_mut(entity)
+        .observe(move |event: On<E>, mut commands: Commands| {
+            if !arrived.swap(true, Ordering::Relaxed) {
+                signal.arrive();
+                commands.entity(event.observer()).despawn();
+            }
+        });
 }
 
 /// A running async task, stored as a resource for [`drive_async_world`] to poll.
@@ -255,7 +262,6 @@ fn observe_once<E: EntityEvent>(world: &mut World, entity: Entity, signal: Arc<S
 pub struct AsyncWorldTask {
     // `Mutex` only to satisfy `Resource`'s `Sync` bound; the driver always has exclusive access.
     future: Mutex<Pin<Box<dyn Future<Output = ()> + Send>>>,
-    waker: Arc<TaskWaker>,
     channel: Arc<TaskChannel>,
 }
 
@@ -266,19 +272,17 @@ impl AsyncWorldTask {
         F: FnOnce(AsyncWorld) -> Fut,
         Fut: Future<Output = ()> + Send + 'static,
     {
-        let channel = Arc::new(TaskChannel::default());
+        let channel = Arc::new(TaskChannel {
+            jobs: Mutex::new(VecDeque::new()),
+            waker: Arc::new(TaskWaker {
+                woken: AtomicBool::new(true),
+            }),
+        });
         let future = Mutex::new(Box::pin(task(AsyncWorld {
             channel: channel.clone(),
         })) as Pin<Box<dyn Future<Output = ()> + Send>>);
 
-        Self {
-            future,
-            // Start woken: the task has not been polled even once yet.
-            waker: Arc::new(TaskWaker {
-                woken: AtomicBool::new(true),
-            }),
-            channel,
-        }
+        Self { future, channel }
     }
 }
 
@@ -290,24 +294,26 @@ pub fn drive_async_world(world: &mut World) {
         return;
     };
 
-    let waker = Waker::from(task.waker.clone());
+    let waker = Waker::from(task.channel.waker.clone());
     let mut cx = Context::from_waker(&waker);
     let future = task
         .future
         .get_mut()
         .expect("async world task future poisoned");
 
-    while task.waker.woken.swap(false, Ordering::AcqRel) {
+    while task.channel.waker.woken.swap(false, Ordering::AcqRel) {
         if future.as_mut().poll(&mut cx).is_ready() {
             return;
         }
 
         // Serving a job re-wakes the task, so the loop continues without waiting for a frame.
-        let Some(job) = task.channel.job.lock().unwrap().take() else {
+        let jobs = std::mem::take(&mut *task.channel.jobs.lock().unwrap());
+        if jobs.is_empty() {
             break;
-        };
-        let result = job(world);
-        *task.channel.result.lock().unwrap() = Some(result);
+        }
+        for job in jobs {
+            job(world);
+        }
     }
 
     world.insert_resource(task);
@@ -319,6 +325,87 @@ mod tests {
 
     #[derive(Resource, Default, PartialEq, Debug)]
     struct Steps(Vec<&'static str>);
+
+    #[test]
+    fn concurrent_world_jobs_keep_their_typed_results() {
+        let mut world = World::new();
+        world.init_resource::<Steps>();
+        world.insert_resource(AsyncWorldTask::new(|w: AsyncWorld| async move {
+            let other = w.clone();
+            let (number, text) = futures::join!(
+                w.with_world(|world| {
+                    world.resource_mut::<Steps>().0.push("number");
+                    42_u32
+                }),
+                other.with_world(|world| {
+                    world.resource_mut::<Steps>().0.push("text");
+                    String::from("ready")
+                }),
+            );
+            assert_eq!(number, 42);
+            assert_eq!(text, "ready");
+        }));
+        drive_async_world(&mut world);
+        assert_eq!(world.resource::<Steps>().0, ["number", "text"]);
+        assert!(!world.contains_resource::<AsyncWorldTask>());
+    }
+
+    #[test]
+    fn spawn_observes_events_fired_during_bundle_insertion() {
+        #[derive(Component)]
+        struct Spawned;
+        #[derive(EntityEvent)]
+        struct Ready {
+            entity: Entity,
+        }
+
+        let mut world = World::new();
+        world
+            .register_component_hooks::<Spawned>()
+            .on_add(|mut world, context| {
+                world.trigger(Ready {
+                    entity: context.entity,
+                });
+            });
+        world.init_resource::<Steps>();
+        world.insert_resource(AsyncWorldTask::new(|w: AsyncWorld| async move {
+            w.spawn_observing::<Ready>(Spawned).await;
+            w.with_world(|world| world.resource_mut::<Steps>().0.push("spawned"))
+                .await;
+        }));
+        drive_async_world(&mut world);
+        assert_eq!(world.resource::<Steps>().0, ["spawned"]);
+        assert!(!world.contains_resource::<AsyncWorldTask>());
+        assert_eq!(world.query::<&Observer>().iter(&world).count(), 0);
+    }
+
+    #[test]
+    fn repeated_events_do_not_complete_another_entitys_wait() {
+        #[derive(EntityEvent)]
+        struct Ready {
+            entity: Entity,
+        }
+
+        let mut world = World::new();
+        world.init_resource::<Steps>();
+        let first = world.spawn_empty().id();
+        let second = world.spawn_empty().id();
+        world.insert_resource(AsyncWorldTask::new(move |w: AsyncWorld| async move {
+            w.observe_all::<Ready, _>(move |_| vec![first, second])
+                .await;
+            w.with_world(|world| world.resource_mut::<Steps>().0.push("ready"))
+                .await;
+        }));
+        drive_async_world(&mut world);
+        world.trigger(Ready { entity: first });
+        world.trigger(Ready { entity: first });
+        drive_async_world(&mut world);
+        assert!(world.resource::<Steps>().0.is_empty());
+        world.trigger(Ready { entity: second });
+        drive_async_world(&mut world);
+        assert_eq!(world.resource::<Steps>().0, ["ready"]);
+        assert_eq!(world.query::<&Observer>().iter(&world).count(), 0);
+    }
 
     #[test]
     fn consecutive_world_jobs_run_in_one_frame() {

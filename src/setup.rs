@@ -1,7 +1,7 @@
 use avian3d::prelude::*;
 use bevy::anti_alias::fxaa::Fxaa;
-use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::prelude::*;
+use bevy::render::view::Tonemapping;
 use bevy_inspector_egui::bevy_egui::{EguiGlobalSettings, PrimaryEguiContext};
 
 use crate::components::{
@@ -58,7 +58,7 @@ pub fn setup(
             far: 500000000.0,
             ..default()
         }),
-        Tonemapping::None,
+        Tonemapping::Linear,
         Msaa::Off,
         Transform::from_xyz(0.0, 10.0, 15.0).looking_at(Vec3::new(0.0, 0.0, 0.0), Vec3::Y),
         MainCamera {
@@ -206,7 +206,9 @@ pub fn setup_collision(
     mut commands: Commands,
     children: Query<&Children>,
     name: Query<&Name, With<Children>>,
-) {
+) -> Result<Vec<Entity>, String> {
+    let mut targets = Vec::new();
+    let mut matched = std::collections::HashSet::new();
     for e in children.iter_descendants(root) {
         let Ok(name) = name.get(e) else {
             continue;
@@ -214,6 +216,19 @@ pub fn setup_collision(
         let Some((constructor, layer, visibility, rigid)) = map.get(name.as_str()) else {
             continue;
         };
+        matched.insert(name.as_str().to_owned());
+        targets.push((e, (constructor, layer, visibility, rigid)));
+    }
+    let mut missing: Vec<_> = map.keys().filter(|name| !matched.contains(*name)).collect();
+    missing.sort();
+    if !missing.is_empty() {
+        return Err(format!(
+            "scene {root:?} is missing collision nodes: {missing:?}"
+        ));
+    }
+    let mut roots = Vec::with_capacity(targets.len());
+    for (e, (constructor, layer, visibility, rigid)) in targets {
+        roots.push(e);
         if let Some(rigid) = rigid {
             commands
                 .entity(e)
@@ -225,4 +240,5 @@ pub fn setup_collision(
             commands.entity(e).insert(*visibility);
         }
     }
+    Ok(roots)
 }

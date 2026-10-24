@@ -4,8 +4,8 @@ pub mod view_copy;
 
 use bevy::camera::RenderTarget;
 use bevy::core_pipeline::prepass::DepthPrepass;
-use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::prelude::*;
+use bevy::render::view::Tonemapping;
 
 use crate::config::SimulationConfig;
 use bevy_metalfx::{MetalFxTemporalUpscaling, UpscaleFactor};
@@ -47,7 +47,7 @@ pub fn setup_capture_camera(world: &mut World) {
 
     let mut capture_camera = world.spawn((
         Camera3d::default(),
-        Tonemapping::None,
+        Tonemapping::Linear,
         RenderTarget::Image(render_target_handle.into()),
         Camera {
             order: CAPTURE_CAMERA_ORDER,

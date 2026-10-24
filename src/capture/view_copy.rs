@@ -10,7 +10,7 @@ use bevy::render::render_resource::{
 };
 use bevy::render::renderer::{RenderContext, ViewQuery};
 use bevy::render::texture::GpuImage;
-use bevy::render::view::ViewDepthTexture;
+use bevy::render::view::ViewDepthStencilTexture;
 
 #[derive(Resource, Clone, Deref, DerefMut)]
 struct CopyViewTextureTarget(Handle<Image>);
@@ -27,7 +27,7 @@ enum ViewTextureCopySource {
 }
 
 fn copy_view_texture_system(
-    view: ViewQuery<(&ExtractedCamera, &ViewDepthTexture)>,
+    view: ViewQuery<(&ExtractedCamera, &ViewDepthStencilTexture)>,
     target_order: Res<CopyViewTextureCameraOrder>,
     target: Res<CopyViewTextureTarget>,
     source: Res<ViewTextureCopySource>,
@@ -50,7 +50,7 @@ fn copy_view_texture_system(
     encoder.push_debug_group("copy capture view texture to image");
     encoder.copy_texture_to_texture(
         TexelCopyTextureInfo {
-            texture: &depth_texture.texture,
+            texture: depth_texture.texture(),
             mip_level: 0,
             origin: Origin3d::ZERO,
             aspect,

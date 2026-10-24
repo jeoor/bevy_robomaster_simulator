@@ -4,6 +4,7 @@ use bevy::{
     camera::visibility::Visibility,
     ecs::{
         bundle::Bundle,
+        change_detection::DetectChangesMut,
         entity::Entity,
         hierarchy::Children,
         system::{Commands, Query},
@@ -48,6 +49,6 @@ pub fn set_visibility(
     visibilities: &mut Query<&mut Visibility>,
 ) -> Result<(), bevy::ecs::query::QueryEntityError> {
     let mut visibility = visibilities.get_mut(entity)?;
-    *visibility = value;
+    visibility.set_if_neq(value);
     Ok(())
 }
