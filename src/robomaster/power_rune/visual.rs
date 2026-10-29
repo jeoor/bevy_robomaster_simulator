@@ -55,11 +55,24 @@ impl RuneVisual {
 pub struct PowerRuneVisuals {
     root: Controller,
     targets: [RuneVisual; RUNE_TARGET_COUNT],
+    applied: Option<VisualState>,
+}
+
+/// Only the rendered state belongs here. Countdown timers do not affect appearance.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct VisualState {
+    mode: RuneMode,
+    root: Activation,
+    targets: [Activation; RUNE_TARGET_COUNT],
 }
 
 impl PowerRuneVisuals {
     pub fn new(root: Controller, targets: [RuneVisual; RUNE_TARGET_COUNT]) -> Self {
-        Self { root, targets }
+        Self {
+            root,
+            targets,
+            applied: None,
+        }
     }
 
     pub fn apply(
@@ -68,9 +81,18 @@ impl PowerRuneVisuals {
         state: &MechanismState,
         appearance: &mut StatefulAppearance,
     ) {
-        self.root.set(state.root_activation(), appearance);
-        for (target, activation) in self.targets.iter_mut().zip(state.target_states()) {
+        let next = VisualState {
+            mode,
+            root: state.root_activation(),
+            targets: state.target_states(),
+        };
+        if self.applied == Some(next) {
+            return;
+        }
+        self.root.set(next.root, appearance);
+        for (target, activation) in self.targets.iter_mut().zip(next.targets) {
             target.apply(mode, activation, appearance);
         }
+        self.applied = Some(next);
     }
 }

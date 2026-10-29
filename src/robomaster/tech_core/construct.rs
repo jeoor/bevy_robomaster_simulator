@@ -7,8 +7,8 @@ use bevy::color::LinearRgba;
 use bevy::ecs::system::Local;
 use bevy::pbr::{MeshMaterial3d, StandardMaterial};
 use bevy::prelude::{
-    Assets, ButtonInput, Children, Color, Commands, Component, Entity, Handle, In, KeyCode, Name,
-    Plugin, Query, Res, ResMut, Time, info, warn,
+    Assets, ButtonInput, Children, Color, Commands, Component, DetectChangesMut, Entity, Handle,
+    In, KeyCode, Name, Plugin, Query, Res, ResMut, Time, info, warn,
 };
 use bevy::world_serialization::{InstanceId, WorldInstanceSpawner};
 use serde_json::{Value, json};
@@ -1050,12 +1050,12 @@ fn assign_material(
     mesh_materials: &mut Query<&mut MeshMaterial3d<StandardMaterial>>,
 ) {
     if let Ok(mut mesh_material) = mesh_materials.get_mut(root) {
-        mesh_material.0 = handle.clone();
+        mesh_material.set_if_neq(MeshMaterial3d(handle.clone()));
     }
 
     for child in children.iter_descendants(root) {
         if let Ok(mut mesh_material) = mesh_materials.get_mut(child) {
-            mesh_material.0 = handle.clone();
+            mesh_material.set_if_neq(MeshMaterial3d(handle.clone()));
         }
     }
 }

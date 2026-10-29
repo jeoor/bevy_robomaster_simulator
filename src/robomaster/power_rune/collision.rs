@@ -1,14 +1,16 @@
 use crate::robomaster::power_rune::common::RuneHitOutcome;
 use crate::robomaster::power_rune::rotation::PowerRuneRotation;
 use crate::robomaster::power_rune::rune::PowerRuneMechanism;
-use avian3d::prelude::{CollisionEnd, CollisionEventsEnabled};
+use avian3d::prelude::{CcdFilter, CollisionEnd, CollisionEventsEnabled, SweptCcd};
 use bevy::prelude::{
     ChildOf, Commands, Component, Entity, EntityEvent, On, Query, ResMut, Resource, Update, With,
 };
 use std::collections::HashSet;
 
 #[derive(Component)]
-#[require(CollisionEventsEnabled)]
+// Avian 0.8 only sweeps against static and kinematic bodies by default. Projectiles also
+// need continuous collision detection against dynamic vehicles and standalone targets.
+#[require(CollisionEventsEnabled, SweptCcd = SweptCcd::new().with_filter(CcdFilter::ALL))]
 pub struct Projectile;
 
 #[derive(Resource, Default)]
@@ -129,5 +131,61 @@ impl bevy::app::Plugin for PowerRuneCollisionPlugin {
         app.init_resource::<ConsumedRuneProjectiles>()
             .add_systems(Update, cleanup_consumed_rune_projectiles)
             .add_observer(handle_rune_collision);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Projectile;
+    use avian3d::prelude::*;
+    use bevy::{prelude::*, time::TimeUpdateStrategy};
+    use std::time::Duration;
+
+    #[test]
+    fn fast_projectiles_do_not_tunnel_through_thin_targets() {
+        for body in [RigidBody::Static, RigidBody::Kinematic, RigidBody::Dynamic] {
+            let mut app = App::new();
+            app.add_plugins((
+                MinimalPlugins,
+                TransformPlugin,
+                AssetPlugin::default(),
+                bevy::mesh::MeshPlugin,
+                PhysicsPlugins::new(Update),
+            ))
+            .insert_resource(Gravity(Vec3::ZERO))
+            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+                1.0 / 60.0,
+            )));
+            app.finish();
+            app.cleanup();
+
+            app.world_mut().spawn((
+                body,
+                Collider::cuboid(0.02, 2.0, 2.0),
+                Transform::IDENTITY,
+                Mass(1000.0),
+            ));
+            let projectile = app
+                .world_mut()
+                .spawn((
+                    Projectile,
+                    RigidBody::Dynamic,
+                    Collider::sphere(0.0085),
+                    Mass(0.0032),
+                    Transform::from_xyz(-1.0, 0.0, 0.0),
+                    LinearVelocity(Vec3::X * 120.0),
+                ))
+                .id();
+
+            // Each step travels two meters without CCD, across the entire thin target.
+            for _ in 0..4 {
+                app.update();
+            }
+            let position = app.world().get::<Position>(projectile).unwrap();
+            assert!(
+                position.x < 0.05,
+                "projectile passed through {body:?}: {position:?}"
+            );
+        }
     }
 }

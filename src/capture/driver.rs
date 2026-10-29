@@ -704,7 +704,10 @@ fn receive_image_from_buffer(mut world: DeferredWorld) {
                 let mut frame_bytes = acquire_frame_buffer(&free_frames, layout.output_len());
 
                 {
-                    let mapped = buffer.slice(..).get_mapped_range();
+                    let mapped = buffer
+                        .slice(..)
+                        .get_mapped_range()
+                        .expect("capture buffer is mapped and exclusively owned by this task");
                     layout.write(&mapped, &mut frame_bytes);
                 }
                 buffer.unmap();
