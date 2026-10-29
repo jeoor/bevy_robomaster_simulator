@@ -61,11 +61,10 @@ pub fn setup_capture_camera(world: &mut World) {
             ..default()
         }),
         Msaa::Off,
-        DepthPrepass,
         CaptureCamera,
     ));
     if let Some(metalfx) = metalfx {
-        capture_camera.insert(metalfx);
+        capture_camera.insert((metalfx, DepthPrepass));
     }
 }
 

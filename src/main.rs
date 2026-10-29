@@ -34,7 +34,8 @@ use crate::robomaster::prelude::RoboMasterPlugins;
 use crate::setup::setup;
 use crate::statistic::ProjectileStatistics;
 use crate::systems::{
-    ChassisObservationFrame, ControllerState, GameplaySystems, PreviousKinematicState,
+    ChassisObservationFrame, ControllerState, EnemyAi, GameplaySystems, PreviousKinematicState,
+    cycle_enemy_ai, move_enemy_ai, remote_chassis_controls_enabled,
     change_appearance, cleanup_projectiles, clear_controller_input, controller_dart_just_pressed,
     controller_shoot_pressed, dart_launch, following_controls, freecam_controls, gimbal_controls,
     gimbal_pid_controls, projectile_aerodynamics, projectile_launch, remote_gimbal_controls,
@@ -146,6 +147,7 @@ fn main() {
         .init_resource::<ChassisObservationFrame>()
         .init_resource::<PreviousKinematicState>()
         .init_resource::<ControllerState>()
+        .init_resource::<EnemyAi>()
         .register_type::<ProjectileStatistics>()
         .insert_resource(Gravity(Vec3::NEG_Y * 9.81))
         .insert_resource(SubstepCount(config.physics.substep_count))
@@ -156,6 +158,7 @@ fn main() {
             TimerMode::Once,
         )))
         .add_systems(Startup, (setup, setup_projectile))
+        .add_systems(PreUpdate, systems::tick_projectile_cooldown)
         .add_observer(on_hit)
         .add_observer(on_activate)
         .configure_sets(
@@ -179,8 +182,10 @@ fn main() {
                     update_auto_aim_subscription,
                     following_controls,
                     switch_slapper_control,
+                    cycle_enemy_ai,
                     vehicle_controls.run_if(|mode: Res<CameraMode>| mode.0 != FollowingType::Free),
-                    remote_vehicle_controls,
+                    remote_vehicle_controls.run_if(remote_chassis_controls_enabled),
+                    move_enemy_ai,
                     gimbal_controls,
                     gimbal_pid_controls.run_if(|enabled: Res<SubscribeAutoAim>| {
                         enabled.load(std::sync::atomic::Ordering::Acquire)

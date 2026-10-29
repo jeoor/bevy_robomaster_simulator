@@ -41,6 +41,7 @@ pub struct RuneActivated {
 pub struct RuneHit {
     #[event_target]
     pub rune: Entity,
+    pub projectile: Entity,
     pub result: HitResult,
 }
 
@@ -88,6 +89,7 @@ fn handle_rune_collision(
 
     commands.trigger(RuneHit {
         rune: target.rune,
+        projectile: projectile_entity,
         result: HitResult { outcome },
     });
 

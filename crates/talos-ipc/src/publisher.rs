@@ -7,14 +7,23 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub struct ShmPublisher {
     meta_region: ShmRegion,
     image_pool: ShmRegion,
+    _overlay_region: ShmRegion,
     current_buffer_id: u8,
     last_synchronized_frame_seq: Option<u64>,
+    _owner_lock: std::fs::File,
 }
 
 impl ShmPublisher {
     pub fn create() -> Result<Self, ShmError> {
+        let owner_lock = std::fs::OpenOptions::new().read(true).write(true).create(true)
+            .truncate(false).open("/tmp/talos_publisher.lock")?;
+        owner_lock.try_lock().map_err(|e| std::io::Error::other(format!("Another simulator owns Talos: {e}")))?;
         let mut meta_region = ShmRegion::create(SHM_NAME_META, size_of::<ShmMetaRegion>())?;
         let image_pool = ShmRegion::create(SHM_NAME_IMAGE_POOL, IMAGE_POOL_SIZE)?;
+        let mut overlay_region = ShmRegion::create(SHM_NAME_OVERLAY, size_of::<OverlayTripleBuffer>())?;
+        unsafe {
+            *overlay_region.as_mut::<OverlayTripleBuffer>() = OverlayTripleBuffer::default();
+        }
 
         unsafe {
             let meta = meta_region.as_mut::<ShmMetaRegion>();
@@ -40,8 +49,10 @@ impl ShmPublisher {
         }
 
         Ok(Self {
+            _owner_lock: owner_lock,
             meta_region,
             image_pool,
+            _overlay_region: overlay_region,
             current_buffer_id: 0,
             last_synchronized_frame_seq: None,
         })
@@ -60,7 +71,12 @@ impl ShmPublisher {
     ) where
         F: FnOnce(&mut Self),
     {
-        assert_eq!(data.len(), IMAGE_SIZE, "Image size mismatch");
+        let (width, height) = unsafe {
+            let header = &self.meta_region.as_ref::<ShmMetaRegion>().header;
+            (header.image_width, header.image_height)
+        };
+        assert!(width > 0 && height > 0 && width <= IMAGE_WIDTH && height <= IMAGE_HEIGHT);
+        assert_eq!(data.len(), (width * height * 3) as usize, "Image size mismatch");
 
         let buffer_id = self.current_buffer_id;
         self.current_buffer_id = (self.current_buffer_id + 1) % 3;
@@ -68,7 +84,7 @@ impl ShmPublisher {
         unsafe {
             let pool_ptr = self.image_pool.as_ptr();
             let dst = pool_ptr.add(buffer_id as usize * IMAGE_SIZE);
-            std::ptr::copy_nonoverlapping(data.as_ptr(), dst, IMAGE_SIZE);
+            std::ptr::copy_nonoverlapping(data.as_ptr(), dst, data.len());
         }
 
         // Publish data associated with this image only after the expensive pixel copy. The image
@@ -86,8 +102,8 @@ impl ShmPublisher {
             let slot = producer.borrow_mut();
             slot.seq = seq;
             slot.timestamp_ns = timestamp_ns;
-            slot.width = IMAGE_WIDTH;
-            slot.height = IMAGE_HEIGHT;
+            slot.width = width;
+            slot.height = height;
             slot.buffer_id = buffer_id;
             slot.format = 0;
             producer.publish();
@@ -183,6 +199,8 @@ impl ShmPublisher {
     pub fn set_camera_info(&mut self, info: CameraInfo) {
         unsafe {
             let meta = self.meta_region.as_mut::<ShmMetaRegion>();
+            meta.header.image_width = info.width;
+            meta.header.image_height = info.height;
             meta.camera_info = info;
         }
     }
@@ -270,5 +288,44 @@ impl TripleBufferInit for GimbalTripleBuffer {
         self.state.store(1, Ordering::Relaxed);
         self.write_idx = 0;
         self.read_idx = 2;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reduced_images_keep_full_pool_stride_without_copying_past_the_frame() {
+        let name = format!("sp_sim_test_{}_{}", std::process::id(), ShmPublisher::now_ns());
+        let lock_path = std::env::temp_dir().join(format!("{name}_lock"));
+        let owner_lock = std::fs::File::create(&lock_path).unwrap();
+        std::fs::remove_file(lock_path).unwrap();
+        let mut publisher = ShmPublisher {
+            meta_region: ShmRegion::create(&format!("{name}_meta"), size_of::<ShmMetaRegion>()).unwrap(),
+            image_pool: ShmRegion::create(&format!("{name}_images"), IMAGE_POOL_SIZE).unwrap(),
+            _overlay_region: ShmRegion::create(&format!("{name}_overlay"), size_of::<OverlayTripleBuffer>()).unwrap(),
+            current_buffer_id: 0,
+            last_synchronized_frame_seq: None,
+            _owner_lock: owner_lock,
+        };
+        unsafe {
+            let meta = publisher.meta_region.as_mut::<ShmMetaRegion>();
+            ShmPublisher::init_triple_buffer(&mut meta.image);
+        }
+        publisher.set_camera_info(CameraInfo { width: 960, height: 720, ..Default::default() });
+        let data = vec![0x5a; 960 * 720 * 3];
+        for seq in 0..3 {
+            publisher.publish_image(&data, seq, 1);
+            unsafe {
+                let meta = publisher.meta_region.as_ref::<ShmMetaRegion>();
+                let slot = &meta.image.slots[(meta.image.state.load(Ordering::Acquire) & INDEX_MASK) as usize];
+                assert_eq!((slot.seq, slot.width, slot.height, slot.buffer_id), (seq, 960, 720, seq as u8));
+                let pool = std::slice::from_raw_parts(publisher.image_pool.as_ptr(), IMAGE_POOL_SIZE);
+                let start = seq as usize * IMAGE_SIZE;
+                assert_eq!(&pool[start..start + data.len()], data.as_slice());
+                assert!(pool[start + data.len()..start + IMAGE_SIZE].iter().all(|&v| v == 0));
+            }
+        }
     }
 }

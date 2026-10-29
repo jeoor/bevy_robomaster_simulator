@@ -12,6 +12,59 @@ pub const IMAGE_SIZE: usize = (IMAGE_WIDTH * IMAGE_HEIGHT * IMAGE_CHANNELS) as u
 pub const IMAGE_POOL_SIZE: usize = IMAGE_SIZE * 3;
 pub const SHM_NAME_META: &str = "talos_ipc_meta";
 pub const SHM_NAME_IMAGE_POOL: &str = "talos_ipc_image_pool";
+pub const SHM_NAME_OVERLAY: &str = "talos_ipc_overlay";
+pub const OVERLAY_MAX_ARMORS: usize = 16;
+
+/// Display-only coordinates returned by vision, normalized to the captured image.
+#[repr(C, align(64))]
+#[derive(Debug, Clone, Copy)]
+pub struct AimOverlay {
+    pub timestamp_ns: u64,
+    pub armor_count: u32,
+    pub aim_valid: u8,
+    pub _align: [u8; 3],
+    pub armors: [[[f32; 2]; 4]; OVERLAY_MAX_ARMORS],
+    pub aim: [f32; 2],
+    pub _pad: [u8; 40],
+}
+const _: () = assert!(size_of::<AimOverlay>() == 576);
+const _: () = assert!(std::mem::offset_of!(AimOverlay, armors) == 16);
+
+impl Default for AimOverlay {
+    fn default() -> Self {
+        Self {
+            timestamp_ns: 0,
+            armor_count: 0,
+            aim_valid: 0,
+            _align: [0; 3],
+            armors: [[[0.0; 2]; 4]; OVERLAY_MAX_ARMORS],
+            aim: [0.0; 2],
+            _pad: [0; 40],
+        }
+    }
+}
+
+#[repr(C, align(64))]
+pub struct OverlayTripleBuffer {
+    pub state: AtomicU8,
+    pub write_idx: u8,
+    pub read_idx: u8,
+    pub _pad: [u8; 61],
+    pub slots: [AimOverlay; 3],
+}
+const _: () = assert!(size_of::<OverlayTripleBuffer>() == 1792);
+
+impl Default for OverlayTripleBuffer {
+    fn default() -> Self {
+        Self {
+            state: AtomicU8::new(1),
+            write_idx: 0,
+            read_idx: 2,
+            _pad: [0; 61],
+            slots: [AimOverlay::default(); 3],
+        }
+    }
+}
 
 pub const FLAG_NEW: u8 = 0x80;
 pub const INDEX_MASK: u8 = 0x03;

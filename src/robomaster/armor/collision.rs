@@ -33,11 +33,13 @@ fn handle_armor_collision(
             .iter_ancestors(other_collider)
             .any(|ancestor| armors.contains(ancestor))
     {
+        if !stats.record_hit(projectile_entity) {
+            return;
+        }
         // Disable collision events for this projectile so it only counts once
         commands
             .entity(projectile_entity)
             .remove::<CollisionEventsEnabled>();
-        stats.increase_accurate();
     }
 }
 

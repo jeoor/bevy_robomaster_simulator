@@ -4,8 +4,8 @@ use bevy::prelude::*;
 use core::{f32::consts::PI, time::Duration};
 
 use crate::components::{
-    Controlled, DartLaunch, DartProjectile, DartSetting, GameLayer, Infantry, InfantryChassis,
-    InfantryGimbal, InfantryLaunchOffset, ProjectileCooldown, ProjectileLifetime,
+    Controlled, DartLaunch, DartProjectile, DartSetting, GameLayer, Infantry,
+    InfantryLaunchOffset, ProjectileCooldown, ProjectileLifetime,
     ProjectileSetting,
 };
 use crate::config::SimulationConfig;
@@ -36,7 +36,6 @@ pub fn setup_projectile(
 }
 
 pub fn projectile_launch(
-    time: Res<Time>,
     mut cooldown: ResMut<ProjectileCooldown>,
     mut stats: ResMut<ProjectileStatistics>,
     config: Res<SimulationConfig>,
@@ -45,31 +44,20 @@ pub fn projectile_launch(
     controller: Option<Res<ControllerState>>,
     mut rumble_requests: MessageWriter<GamepadRumbleRequest>,
     setting: Res<ProjectileSetting>,
-    infantry: Single<
-        (&Transform, &LinearVelocity, &AngularVelocity),
-        (With<Infantry>, With<Controlled>),
-    >,
-    gimbal: Single<
-        (&GlobalTransform, &InfantryGimbal),
-        (With<Controlled>, Without<InfantryChassis>),
-    >,
-    launch_offset: Single<&Transform, (With<Controlled>, With<InfantryLaunchOffset>)>,
+    infantry: Single<(&LinearVelocity, &AngularVelocity), (With<Infantry>, With<Controlled>)>,
+    launch_offset: Single<&GlobalTransform, (With<Controlled>, With<InfantryLaunchOffset>)>,
 ) {
-    cooldown.tick(time.delta());
     if !cooldown.is_finished() {
         return;
     }
     cooldown.reset();
 
-    stats.increase_launch();
-    let direction = (gimbal.0.rotation() * launch_offset.rotation)
-        .mul_vec3(Vec3::Y)
-        .normalize_or_zero();
+    let direction = (launch_offset.rotation() * Vec3::Y).normalize_or_zero();
     if direction == Vec3::ZERO {
         return;
     }
-    let vel = infantry.1.0 + direction * config.projectile.speed;
-    commands.spawn((
+    let vel = infantry.0.0 + direction * config.projectile.speed;
+    let projectile = commands.spawn((
         RigidBody::Dynamic,
         Collider::sphere(config.projectile.diameter / 2.0),
         Mass(config.projectile.mass),
@@ -80,16 +68,15 @@ pub fn projectile_launch(
         Mesh3d(setting.0.clone()),
         MeshMaterial3d(setting.1.clone()),
         LinearVelocity(vel),
-        AngularVelocity(infantry.2.0),
-        Transform::IDENTITY.with_translation(
-            infantry.0.translation + (gimbal.0.rotation() * launch_offset.translation),
-        ),
+        AngularVelocity(infantry.1.0),
+        Transform::from_translation(launch_offset.translation()),
         ProjectileLifetime(Timer::from_seconds(
             config.projectile.lifetime,
             TimerMode::Once,
         )),
         Projectile,
-    ));
+    )).id();
+    stats.record_launch(projectile);
     request_controller_rumble(
         controller.as_deref(),
         &mut rumble_requests,
@@ -99,6 +86,10 @@ pub fn projectile_launch(
         },
         Duration::from_millis(80),
     );
+}
+
+pub fn tick_projectile_cooldown(time: Res<Time>, mut cooldown: ResMut<ProjectileCooldown>) {
+    cooldown.tick(time.delta());
 }
 
 pub fn projectile_aerodynamics(
@@ -163,7 +154,6 @@ pub fn dart_launch(
         return;
     }
 
-    stats.increase_launch();
 
     let transform =
         Transform::from_translation(launcher.translation() + direction * DART_SPAWN_OFFSET_M)
@@ -179,7 +169,7 @@ pub fn dart_launch(
         })
         .with_default_layers(GameLayer::projectile_collision_layers(true))
     };
-    commands.spawn((
+    let projectile = commands.spawn((
         RigidBody::Dynamic,
         voxel(0.005),
         Mass(DART_MASS_KG),
@@ -196,7 +186,8 @@ pub fn dart_launch(
         )),
         Projectile,
         DartProjectile,
-    ));
+    )).id();
+    stats.record_launch(projectile);
     request_controller_rumble(
         controller.as_deref(),
         &mut rumble_requests,
@@ -217,6 +208,34 @@ pub fn cleanup_projectiles(
         lifetime.tick(time.delta());
         if lifetime.is_finished() {
             commands.entity(entity).despawn();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+
+    #[test]
+    fn sparse_fire_requests_do_not_slow_the_cooldown() {
+        for fps in [15, 30, 60] {
+            let mut world = World::new();
+            world.insert_resource(Time::<()>::default());
+            world.insert_resource(ProjectileCooldown(Timer::from_seconds(0.05, TimerMode::Once)));
+            let interval = (fps + 1) / 2;
+            let mut fired = 0;
+            for frame in 1..=fps * 4 {
+                world.resource_mut::<Time>().advance_by(Duration::from_secs_f64(1.0 / fps as f64));
+                world.run_system_once(tick_projectile_cooldown).unwrap();
+                if frame % interval == 0 {
+                    let mut cooldown = world.resource_mut::<ProjectileCooldown>();
+                    assert!(cooldown.is_finished(), "Cooldown stalled at {fps} FPS");
+                    cooldown.reset();
+                    fired += 1;
+                }
+            }
+            assert_eq!(fired, fps * 4 / interval);
         }
     }
 }

@@ -86,7 +86,7 @@ mod tests {
             (
                 ENGINEER_ROBOT_CONFIG,
                 ArmorType::Small,
-                ArmorLabel::Sentry,
+                ArmorLabel::Two,
                 4,
             ),
             (

@@ -5,6 +5,7 @@
 
 mod capture;
 mod ground_truth;
+mod overlay;
 mod plugin;
 
 pub use plugin::TalosPlugin;

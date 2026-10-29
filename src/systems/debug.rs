@@ -5,15 +5,16 @@ use bevy::window::{CursorIcon, SystemCursorIcon, Window};
 use crate::components::{SlapperInfantry, SubscribeAutoAim};
 use crate::robomaster::prelude::{Armor, ArmorStickerSelection};
 use crate::statistic::ProjectileStatistics;
-use crate::systems::ControllerState;
+use crate::systems::{ControllerState, EnemyAi};
 
 fn create_help_text(
     auto_aim: bool,
     stats: &ProjectileStatistics,
     controller: &ControllerState,
+    ai: &EnemyAi,
 ) -> Text {
     format!(
-        "auto-aim={} total={} accurate={} pct={:.2}\ncontroller={} mode={} gyro={} remote-gyro={}\n{}",
+        "auto-aim={} total={} accurate={} pct={:.2}\ncontroller={} mode={} gyro={} remote-gyro={}\n{}{}\nF7 Enemy AI: {}",
         if auto_aim { "ON " } else { "OFF" },
         stats.launch_count,
         stats.accurate_count,
@@ -30,7 +31,11 @@ fn create_help_text(
         } else {
             "OFF"
         },
-        controller.help_controls()
+        controller.help_controls(),
+        if cfg!(feature = "talos") {
+            "\nF6 Markers | green: detection | yellow +: prediction"
+        } else { "" },
+        ai.label(),
     )
     .into()
 }
@@ -52,12 +57,14 @@ pub fn update_help_text(
     auto_aim: Res<SubscribeAutoAim>,
     stats: Res<ProjectileStatistics>,
     controller: Res<ControllerState>,
+    ai: Res<EnemyAi>,
 ) {
     for mut text in text.iter_mut() {
         *text = create_help_text(
             auto_aim.load(std::sync::atomic::Ordering::Acquire),
             &stats,
             &controller,
+            &ai,
         );
     }
 }

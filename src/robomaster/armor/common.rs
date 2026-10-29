@@ -154,7 +154,7 @@ pub const LARGE_ARMOR_STICKER_SLOTS: [ArmorStickerSlot; 5] = [
         name_suffix: "1",
     },
     ArmorStickerSlot {
-        label: ArmorLabel::Base,
+        label: ArmorLabel::Three,
         name_suffix: "3",
     },
     ArmorStickerSlot {
@@ -253,7 +253,6 @@ mod tests {
         assert_eq!(ArmorLabel::index_from_small(ArmorLabel::Outpost), 5);
         assert_eq!(ArmorLabel::index_from_small(ArmorLabel::Base), 6);
         assert_eq!(ArmorLabel::index_from_small(ArmorLabel::Five), 7);
-        assert_eq!(ArmorLabel::index_from_small(ArmorLabel::Base), 8);
     }
 
     #[test]

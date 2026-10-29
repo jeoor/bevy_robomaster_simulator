@@ -22,6 +22,15 @@ impl GimbalAimTarget {
     fn rotation(self) -> Quat {
         Quat::from_euler(EulerRot::YXZ, self.yaw, self.pitch, 0.0)
     }
+
+    pub(crate) fn in_fire_window(self, muzzle: Quat, tolerance: Vec2) -> bool {
+        let expected = self.rotation() * Vec3::Y;
+        let actual = muzzle * Vec3::Y;
+        let yaw_error = wrap_angle(expected.x.atan2(-expected.z) - actual.x.atan2(-actual.z));
+        let pitch_error = expected.y.atan2(expected.xz().length())
+            - actual.y.atan2(actual.xz().length());
+        yaw_error.abs() < tolerance.x && pitch_error.abs() < tolerance.y
+    }
 }
 
 /// One independent single-axis PID loop.
@@ -40,7 +49,10 @@ impl AxisPid {
         self.previous_error = error;
 
         let rate = error * config.kp + self.integral * config.ki + derivative * config.kd;
+        // A long render frame must not integrate past the remaining target error.
+        let max_step_rate = error.abs() / dt;
         rate.clamp(-config.max_rate, config.max_rate)
+            .clamp(-max_step_rate, max_step_rate)
     }
 }
 
@@ -176,6 +188,19 @@ mod tests {
     }
 
     #[test]
+    fn fire_window_uses_actual_muzzle_direction_in_both_axes() {
+        let target = GimbalAimTarget { yaw: 3.14, pitch: -1.5 };
+        let tolerance = Vec2::new(0.01, 0.005);
+        assert!(target.in_fire_window(target.rotation(), tolerance));
+        let yaw_miss = Quat::from_euler(EulerRot::YXZ, target.yaw + 0.03, target.pitch, 0.0);
+        let pitch_miss = Quat::from_euler(EulerRot::YXZ, target.yaw, target.pitch + 0.02, 0.0);
+        assert!(!target.in_fire_window(yaw_miss, tolerance));
+        assert!(!target.in_fire_window(pitch_miss, tolerance));
+        let wrapped = Quat::from_euler(EulerRot::YXZ, -3.14, target.pitch, 0.0);
+        assert!(target.in_fire_window(wrapped, tolerance));
+    }
+
+    #[test]
     fn proportional_rate_follows_error_sign_and_magnitude() {
         let mut pid = AxisPid::default();
 
@@ -295,6 +320,58 @@ mod tests {
         let (yaw, pitch, _) = local.to_euler(EulerRot::YXZ);
         assert!((yaw - 0.3).abs() < 1e-3, "yaw settled at {yaw}");
         assert!((pitch + 0.2).abs() < 1e-3, "pitch settled at {pitch}");
+    }
+
+    #[test]
+    fn configured_pid_does_not_step_past_target_at_low_frame_rates() {
+        let config: SimulationConfig = toml::from_str(include_str!("../../config.toml")).unwrap();
+        for axis in [
+            &config.vehicle.gimbal_pid.yaw,
+            &config.vehicle.gimbal_pid.pitch,
+        ] {
+            for dt in [1.0 / 15.0, 1.0 / 20.0, 1.0 / 30.0, 0.1] {
+                for error in [-0.6_f32, 0.6] {
+                    let step = AxisPid::default().step(error, axis, dt) * dt;
+                    assert!(
+                        step.abs() <= error.abs() + 1e-6,
+                        "dt={dt}, error={error}, step={step}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn configured_pid_converges_with_variable_frames_and_real_muzzle_mount() {
+        let config: SimulationConfig = toml::from_str(include_str!("../../config.toml")).unwrap();
+        let chassis = Quat::from_rotation_y(2.8);
+        let mount = Quat::from_xyzw(-0.53729963, 0.0, 0.0, 0.8433914).normalize();
+        for (start_yaw, goal_yaw) in [(0.3, -0.4), (-2.9, 2.9), (2.9, -2.9)] {
+            let goal = Quat::from_euler(EulerRot::YXZ, goal_yaw, -0.45, 0.0);
+            let target = chassis * goal * mount;
+            let mut yaw_pid = AxisPid::default();
+            let mut pitch_pid = AxisPid::default();
+            let mut local = Quat::from_rotation_y(start_yaw);
+            for dt in [1.0 / 15.0, 1.0 / 30.0, 1.0 / 20.0, 0.1]
+                .into_iter()
+                .cycle()
+                .take(120)
+            {
+                let world = chassis * local;
+                let error = tracking_error(target, local, world, world * mount);
+                let (yaw, pitch, _) = local.to_euler(EulerRot::YXZ);
+                local = Quat::from_euler(
+                    EulerRot::YXZ,
+                    yaw + yaw_pid.step(error.x, &config.vehicle.gimbal_pid.yaw, dt) * dt,
+                    pitch + pitch_pid.step(error.y, &config.vehicle.gimbal_pid.pitch, dt) * dt,
+                    0.0,
+                );
+            }
+            assert!(
+                local.angle_between(goal) < 1e-3,
+                "gimbal failed to settle: {local:?}"
+            );
+        }
     }
 
     #[test]

@@ -13,7 +13,7 @@ use avian3d::prelude::*;
 const CHASSIS_ROTATION_STOP_EPSILON: f32 = 1e-3;
 const CHASSIS_TILT_LIMIT: f32 = 20.0 * std::f32::consts::PI / 180.0;
 
-fn update_chassis_rotation(
+pub(super) fn update_chassis_rotation(
     chassis_transform: &mut Transform,
     chassis_data: &mut InfantryChassis,
     yaw_input: f32,

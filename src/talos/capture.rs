@@ -103,7 +103,7 @@ impl SnapshotAsync for TalosSnapshot {
             return;
         }
 
-        if frame.width != IMAGE_WIDTH || frame.height != IMAGE_HEIGHT {
+        if frame.width > IMAGE_WIDTH || frame.height > IMAGE_HEIGHT || frame.width == 0 || frame.height == 0 {
             warn!(
                 "image reesolution mismatched: expected {}x{}, got {}x{}",
                 IMAGE_WIDTH, IMAGE_HEIGHT, frame.width, frame.height
